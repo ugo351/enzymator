@@ -2,7 +2,7 @@
 
 This project is licensed under the MIT License - see the LICENSE.txt file for details.
 
-# Enzymator V1.00 - Peptide Analysis Tool
+# Enzymator V1.10 - Peptide Analysis Tool
 
 ## Overview
 
