@@ -390,7 +390,7 @@
 <body>
   <div class="app">
     <header class="header">
-      <h1>EnzymatorV1.10 - Version HTML</h1>
+      <h1>EnzymatorV1.30 - Version HTML</h1>
       <p>Conversion web du script Python: analyse MALDI-MS, Soustractor, MS/MS et Digest Only.</p>
     </header>
 
@@ -439,6 +439,7 @@
               <select id="labelMain">
                 <option>AmbCHCA</option>
                 <option selected>AhxCHCA</option>
+                <option>Biotin-PEG4-Pen</option>
                 <option>Aucun</option>
               </select>
             </div>
@@ -511,6 +512,7 @@
               <select id="digestLabel">
                 <option>AmbCHCA</option>
                 <option>AhxCHCA</option>
+                <option>Biotin-PEG4-Pen</option>
                 <option selected>Aucun</option>
               </select>
             </div>
@@ -585,15 +587,15 @@
             <div>
               <label>Mode visualisation Y</label>
               <select id="soustractorDisplayMode">
-                <option value="relative" selected>Relative</option>
-                <option value="absolute">Absolue</option>
+                <option value="relative">Relative</option>
+                <option value="absolute" selected>Absolue</option>
               </select>
             </div>
             <div>
               <label>Mode export intensite</label>
               <select id="soustractorExportMode">
-                <option value="relative" selected>Relative</option>
-                <option value="absolute">Absolue</option>
+                <option value="relative">Relative</option>
+                <option value="absolute" selected>Absolue</option>
               </select>
             </div>
           </div>
@@ -680,12 +682,16 @@
             <label>MS/MS Excel <input id="msmsExcel" type="file" accept=".xlsx,.xls" /></label>
             <label>Precursor tolerance <input id="msmsTol" type="number" step="0.1" value="0.5" /></label>
             <label>Fragment tolerance <input id="fragTol" type="number" step="0.1" value="0.5" /></label>
+            <label>S/N min fragments <input id="msmsSNThreshold" type="number" step="1" value="0" min="0" style="width:60px;" /></label>
+            <label title="Add a separate N-ter hypothesis for MMP peptides starting within 5 residues of a documented activation site"><input id="msmsIncludeNeoNTerm" type="checkbox" checked /> Neo N-ter alternatives (+/-5 aa)</label>
+            <label title="Overrides the selected tag increment and applies to any N-terminal amino acid">Custom N-ter mass shift (Da) <input id="msmsNTermMassShift" type="number" step="any" placeholder="Auto" /></label>
           </div>
           <div class="row" style="margin-top:8px;">
             <label>Label type
               <select id="msmsLabelType" style="width:140px;">
                 <option>AmbCHCA</option>
                 <option selected>AhxCHCA</option>
+                <option>Biotin-PEG4-Pen</option>
                 <option>Aucun</option>
               </select>
             </label>
@@ -695,6 +701,10 @@
             <span id="msmsStatus" class="status"></span>
           </div>
           <p class="muted" style="margin-top:8px;">Prerequis: lancer d'abord une recherche MALDI dans l'onglet principal.</p>
+          <p class="muted" style="margin-top:4px;">
+            Score = 100 x (somme des poids des fragments matches) / (somme des poids de tous les fragments theoriques).
+            Poids: b/y = 1, a = 0.5, internes = 0.6, immoniums = 0.15, pertes/gains H2O ou NH3 = 0.25.
+          </p>
         </fieldset>
 
         <fieldset>
@@ -821,6 +831,23 @@
   const massH = 1.007825;
   const massO = 15.994915;
   const massProton = 1.007276;
+  const labeledKResidueMasses = {
+    AmbCHCA: 432.17976,
+    AhxCHCA: 412.21106,
+    "Biotin-PEG4-Pen": 714.3986
+  };
+  const neoNTermCleavageCenters = {
+    hMMP1: 100,
+    hMMP2: 110,
+    hMMP3: 100,
+    hMMP7: 95,
+    hMMP8: 100,
+    hMMP9: 107,
+    hMMP10: 99,
+    hMMP12: 106,
+    hMMP13: 104
+  };
+  const neoNTermPositionTolerance = 5;
 
   const config = {
     tolerance: 0.5,
@@ -828,9 +855,24 @@
     markingTypes: {
       AmbCHCA: 304.095792,
       AhxCHCA: 284.126092,
+      "Biotin-PEG4-Pen": labeledKResidueMasses["Biotin-PEG4-Pen"] - aminoAcidsMasses.K,
       Aucun: 0.0
     }
   };
+
+  function isNeoNTermPosition(protein, position) {
+    const center = neoNTermCleavageCenters[protein];
+    const start = typeof position === "number" ? position : Number(String(position || "").split("-")[0]);
+    return Number.isInteger(center) && Number.isInteger(start) && Math.abs(start - center) <= neoNTermPositionTolerance;
+  }
+
+  function getNeoNTermMassShift(labelType, customShift = null) {
+    if (customShift != null) return customShift;
+    if (labelType === "AhxCHCA" || labelType === "Biotin-PEG4-Pen") {
+      return config.markingTypes[labelType];
+    }
+    return null;
+  }
 
   const PROFILES = [
     {
@@ -899,9 +941,7 @@
   }
 
   function adjustTargetMass(targetMass, labeling) {
-    if (labeling === "AmbCHCA") return targetMass - 304.095792;
-    if (labeling === "AhxCHCA") return targetMass - 284.126092;
-    return targetMass;
+    return targetMass - (config.markingTypes[labeling] || 0);
   }
 
   function verifySequence(seq) {
@@ -944,7 +984,7 @@
 
   function calculateMissedCleavagesInProtein(proteinSeq, peptideStart, peptideEnd, enzymeKeys, label) {
     if (!enzymeKeys.length) return 0;
-    const labeledK = (label === "AmbCHCA" || label === "AhxCHCA");
+    const labeledK = label !== "Aucun";
     let count = 0;
     let labeledKDeducted = false;
     for (let i = peptideStart; i < peptideEnd; i++) {
@@ -1120,16 +1160,21 @@
               const startIsCleavage = startPos === 0 || isCleavageSiteAt(sequenceToCompare, startPos - 1, selectedEnzymes);
               if (!endIsCleavage || !startIsCleavage) continue;
             }
-            if ((label === "AmbCHCA" || label === "AhxCHCA") && !seq.includes("K")) continue;
+            const hasNeoNTermLabelSite = (label === "AhxCHCA" || label === "Biotin-PEG4-Pen")
+              && isNeoNTermPosition(protein, startPos + 1);
+            if (label !== "Aucun" && !seq.includes("K") && !hasNeoNTermLabelSite) continue;
             if (!verifySequence(seq)) continue;
 
-            const miss = calculateMissedCleavagesInProtein(sequenceToCompare, startPos, endPos, selectedEnzymes, label);
+            const missedCleavagesForK = calculateMissedCleavagesInProtein(sequenceToCompare, startPos, endPos, selectedEnzymes, label);
+            const missedCleavagesForNeoNTerm = hasNeoNTermLabelSite
+              ? calculateMissedCleavagesInProtein(sequenceToCompare, startPos, endPos, selectedEnzymes, "Aucun")
+              : Infinity;
+            const miss = Math.min(missedCleavagesForK, missedCleavagesForNeoNTerm);
             if (miss > config.maxMissedCleavages) continue;
-            if (!includeProdomain && domainStatus(protein, startPos + 1) === "yes") continue;
+            const isNeoNTerm = isNeoNTermPosition(protein, startPos + 1);
+            if (!includeProdomain && domainStatus(protein, startPos + 1) === "yes" && !isNeoNTerm) continue;
 
-            let labeledMass = adjustedMass;
-            if (label === "AmbCHCA") labeledMass = adjustedMass + 304.095792;
-            else if (label === "AhxCHCA") labeledMass = adjustedMass + 284.126092;
+            const labeledMass = adjustedMass + (config.markingTypes[label] || 0);
 
             const gap = Number((labeledMass - targetMass).toFixed(2));
             const prevAA = startPos > 0 ? sequenceToCompare[startPos - 1] : null;
@@ -1137,7 +1182,7 @@
 
             const sequencePrint = `(${prevAA || "None"})${seq}`;
             const position = `${startPos + 1}-${endPos + 1}`;
-            const pro = domainStatus(protein, startPos + 1);
+            const pro = isNeoNTerm ? "neo-N-ter" : domainStatus(protein, startPos + 1);
 
             rows.push([peakAdjusted, protein, sequencePrint, position, Number(labeledMass.toFixed(2)), gap, miss, pro]);
             found = true;
@@ -1286,51 +1331,48 @@
     return sorted;
   }
 
-  function addIsotopeColumnPreserveOrder(rows) {
-    const indexed = rows.map((r, idx) => ({ ...r, _idx: idx }));
-    const sorted = [...indexed].sort((a, b) => a.mz - b.mz);
-    let isotopeCounter = 0;
-
-    for (let i = 0; i < sorted.length; i++) {
-      if (i === 0 || sorted[i].mz - sorted[i - 1].mz > 1.2) isotopeCounter = 0;
-      else isotopeCounter += 1;
-      sorted[i].isotope = isotopeCounter > 0 ? `A+${isotopeCounter}` : "A";
-    }
-
-    sorted.sort((a, b) => a._idx - b._idx);
-    return sorted.map(({ _idx, ...rest }) => rest);
-  }
-
   function computeSoustractorTopRows() {
     const topN = Math.max(1, Number($("soustractorTopN").value || 50));
     const displayMode = $("soustractorDisplayMode").value;
     const source = displayMode === "absolute" ? soustractorVizState.subAbsolute : soustractorVizState.subRelative;
 
     const grouped = groupAndSum(source, findLocalMaxima(source));
+
+    // Pick the top N monoisotopic ("A") peaks: walk peaks by decreasing intensity and skip any
+    // peak within isotope spacing (<=1.2 Da) of an already-picked, more intense peak. Scoping the
+    // isotope check to already-picked peaks only (instead of the whole spectrum) avoids a chain
+    // reaction that would otherwise collapse the entire spectrum into a single isotope cluster.
+    const byIntensity = [...grouped].sort((a, b) => b.intens - a.intens);
+    const picked = [];
+    for (const p of byIntensity) {
+      if (picked.length >= topN) break;
+      if (picked.some(q => Math.abs(p.mz - q.mz) <= 1.2)) continue;
+      picked.push({ ...p, isotope: "A" });
+    }
+
     const sortBy = $("soustractorSortBy").value;
     const sortOrder = $("soustractorSortOrder").value;
     const dir = sortOrder === "asc" ? 1 : -1;
 
-    const sorted = [...grouped].sort((a, b) => {
+    const top = [...picked].sort((a, b) => {
       const av = sortBy === "mz" ? a.mz : a.intens;
       const bv = sortBy === "mz" ? b.mz : b.intens;
       if (av === bv) return 0;
       return av < bv ? -dir : dir;
     });
 
-    const top = addIsotopeColumnPreserveOrder(sorted.slice(0, topN));
     soustractorVizState.groupedRows = grouped;
     soustractorVizState.topRows = top;
-    soustractorVizState.isotopeA = top.filter(r => r.isotope === "A").map(r => r.mz);
+    soustractorVizState.isotopeA = top.map(r => r.mz);
   }
 
   function getSoustractorDisplayArray() {
-    const mode = $("soustractorDisplayMode")?.value || "relative";
+    const mode = $("soustractorDisplayMode")?.value || "absolute";
     return mode === "absolute" ? soustractorVizState.subAbsolute : soustractorVizState.subRelative;
   }
 
   function getExportIntensityLabel() {
-    return $("soustractorExportMode")?.value === "absolute" ? "Intens." : "Rel. Intens.";
+    return $("soustractorExportMode")?.value === "relative" ? "Rel. Intens." : "Intens.";
   }
 
   function getDisplayYLabel() {
@@ -1868,7 +1910,7 @@
     return m ? Number(m[1]) : null;
   }
 
-  function readAllSheetsPrecursorMasses(workbook) {
+  function readAllSheetsPrecursorMasses(workbook, snMsmsMin = 0) {
     const out = [];
     for (const sheetName of workbook.SheetNames) {
       const ws = workbook.Sheets[sheetName];
@@ -1877,19 +1919,28 @@
       if (!Number.isFinite(precursor)) continue;
 
       const msms = [];
+      let filteredBySN = 0;
       for (let i = 3; i < rows.length; i++) {
         const row = rows[i] || [];
         const mz = Number(String(row[0] ?? "").replace(",", "."));
         const intens = Number(String(row[2] ?? "").replace(",", "."));
-        if (Number.isFinite(mz) && Number.isFinite(intens)) msms.push({ mz, intens });
+        if (!Number.isFinite(mz) || !Number.isFinite(intens)) continue;
+        if (snMsmsMin > 0) {
+          const sn = Number(String(row[1] ?? "").replace(",", "."));
+          if (!Number.isFinite(sn) || sn < snMsmsMin) { filteredBySN++; continue; }
+        }
+        msms.push({ mz, intens });
       }
-      out.push({ sheetName, precursorMass: precursor, msms });
+      out.push({ sheetName, precursorMass: precursor, msms, filteredBySN });
     }
     return out;
   }
 
-  function filterPeptidesByMass(peptides, precursorMass, tolerance) {
-    return peptides.filter(p => Math.abs(p.adjustedMass + 1 - precursorMass) <= tolerance);
+  function filterPeptidesByMass(peptides, precursorMass, tolerance, massAdjustments = 0) {
+    return peptides.filter(p => {
+      const adjustments = typeof massAdjustments === "function" ? massAdjustments(p) : [massAdjustments];
+      return adjustments.some(adjustment => Math.abs(p.adjustedMass + adjustment + 1 - precursorMass) <= tolerance);
+    });
   }
 
   function generateLabeledMsmsSequence(sequence, labelType) {
@@ -1902,7 +1953,7 @@
     return posK.map(pos => ({ sequence, labelPos: pos, labelType }));
   }
 
-  function generateTheoreticalFragmentsWithMarking(sequence, labelPos = null, labelType = "None") {
+  function generateTheoreticalFragmentsWithMarking(sequence, labelPos = null, labelType = "None", nTermMassShift = 0) {
     const fragments = [];
     const lossH2O = 18.010565;
     const lossNH3 = 17.026549;
@@ -1914,11 +1965,13 @@
 
     const massKAhx = 412.21106;
     const massKAmb = 432.17976;
+    const massKBiotin = 714.3986;
 
     const getAaMass = (aa, position) => {
       if (aa === "K" && labelPos != null && position === labelPos) {
         if (labelType === "AhxCHCA") return massKAhx;
         if (labelType === "AmbCHCA") return massKAmb;
+        if (labelType === "Biotin-PEG4-Pen") return massKBiotin;
       }
       return aminoAcidsMasses[aa] || 0;
     };
@@ -1933,6 +1986,7 @@
       const fragSeq = sequence.slice(0, i);
       let massB = 0;
       for (let p = 0; p < fragSeq.length; p++) massB += getAaMass(fragSeq[p], p);
+      massB += nTermMassShift;
       const mzB = +(massB + massProton).toFixed(4);
       const mzA = +(massB - lossCO + massProton).toFixed(4);
       fragments.push({ type: "b", num: i, mz: mzB });
@@ -2005,9 +2059,23 @@
     return matches;
   }
 
+  // Diagnostic value per fragment type: primary b/y ions count fully, immonium ions and
+  // water/ammonia loss-or-gain variants are much less specific so they weigh little in the score.
+  function getFragmentTypeWeight(type) {
+    if (!type) return 1;
+    if (type.includes("H2O") || type.includes("NH3")) return 0.25;
+    if (type === "i") return 0.15;
+    if (type.startsWith("internal")) return 0.6;
+    if (type === "a") return 0.5;
+    return 1; // b, y ions
+  }
+
   function ionMatchScore(theoretical, matches) {
     if (!theoretical.length) return 0;
-    return +(100 * matches.length / theoretical.length).toFixed(1);
+    const totalWeight = theoretical.reduce((sum, f) => sum + getFragmentTypeWeight(f.type), 0);
+    if (!totalWeight) return 0;
+    const matchedWeight = matches.reduce((sum, f) => sum + getFragmentTypeWeight(f.type), 0);
+    return +(100 * matchedWeight / totalWeight).toFixed(1);
   }
 
   function toSubscriptNumber(value) {
@@ -2079,6 +2147,21 @@
       const tolerance = Number($("msmsTol").value || 0.5);
       const fragTol = Number($("fragTol").value || 0.5);
       const labelType = $("msmsLabelType")?.value || $("labelMain")?.value || "Aucun";
+      const snMsmsMin = Number($("msmsSNThreshold")?.value ?? 0);
+      const includeNeoNTerm = $("msmsIncludeNeoNTerm").checked;
+      const nTermMassShiftInput = $("msmsNTermMassShift").value.trim();
+      const customNTermMassShift = nTermMassShiftInput === "" ? null : Number(nTermMassShiftInput);
+      if (customNTermMassShift !== null && !Number.isFinite(customNTermMassShift)) {
+        setStatus("msmsStatus", "Entrer un decalage de masse N-ter valide.", "warn");
+        return;
+      }
+      const mainLabelType = $("labelMain")?.value || "Aucun";
+      const mainLabelMassShift = mainLabelType === "AmbCHCA" ? 304.095792
+        : config.markingTypes[mainLabelType] || 0;
+      const msmsLabelMassShift = config.markingTypes[labelType] || 0;
+      const nTermMassShift = includeNeoNTerm
+        ? getNeoNTermMassShift(labelType, customNTermMassShift)
+        : null;
 
       const peptides = mainResultsRows.map(r => ({
         sequence: String(r[2]).split(")").pop(),
@@ -2087,15 +2170,66 @@
         position: r[3]
       }));
 
-      const sheets = readAllSheetsPrecursorMasses(msmsWorkbook);
+      const sheets = readAllSheetsPrecursorMasses(msmsWorkbook, snMsmsMin);
       const report = [];
 
       for (const s of sheets) {
-        const peptidesMatch = filterPeptidesByMass(peptides, s.precursorMass, tolerance);
+        const kPrecursorAdjustment = msmsLabelMassShift - mainLabelMassShift;
+        const nTermPrecursorAdjustment = nTermMassShift == null || nTermMassShift === 0
+          ? null
+          : nTermMassShift - mainLabelMassShift;
+        const peptidesMatch = filterPeptidesByMass(peptides, s.precursorMass, tolerance, pep => {
+          const adjustments = [];
+          if (labelType === "Aucun") adjustments.push(-mainLabelMassShift);
+          else if (pep.sequence.includes("K")) adjustments.push(kPrecursorAdjustment);
+          if (nTermPrecursorAdjustment != null && isNeoNTermPosition(pep.protein, pep.position)) {
+            adjustments.push(nTermPrecursorAdjustment);
+          }
+          return adjustments;
+        });
         for (const pep of peptidesMatch) {
-          const variants = generateLabeledMsmsSequence(pep.sequence, labelType);
+          const [peptideStart, peptideEnd] = String(pep.position || "").split("-").map(value => Number(value) - 1);
+          const proteinSequence = sequencesDict[pep.protein] || "";
+          const selectedEnzymes = getSelectedMainEnzymes();
+          const missedCleavagesForLabel = label => proteinSequence
+            ? calculateMissedCleavagesInProtein(proteinSequence, peptideStart, peptideEnd, selectedEnzymes, label)
+            : 0;
+          const kPrecursorMatches = labelType === "Aucun"
+            ? Math.abs(pep.adjustedMass - mainLabelMassShift + 1 - s.precursorMass) <= tolerance
+              && missedCleavagesForLabel("Aucun") <= config.maxMissedCleavages
+            : pep.sequence.includes("K")
+              && missedCleavagesForLabel(labelType) <= config.maxMissedCleavages
+              && Math.abs(pep.adjustedMass + kPrecursorAdjustment + 1 - s.precursorMass) <= tolerance;
+          const neoNTermPrecursorMatches = nTermPrecursorAdjustment != null
+            && isNeoNTermPosition(pep.protein, pep.position)
+            && missedCleavagesForLabel("Aucun") <= config.maxMissedCleavages
+            && Math.abs(pep.adjustedMass + nTermPrecursorAdjustment + 1 - s.precursorMass) <= tolerance;
+          const variants = [];
+          if (kPrecursorMatches) {
+            const lysineVariants = labelType === "Aucun"
+              ? [{ sequence: pep.sequence, labelPos: null, labelType: "None" }]
+              : generateLabeledMsmsSequence(pep.sequence, labelType);
+            for (const variant of lysineVariants) {
+              variants.push({
+                ...variant,
+                labelSite: labelType === "Aucun" ? "None" : "K",
+                nTermMassShift: 0,
+                precursorAdjustment: labelType === "Aucun" ? -mainLabelMassShift : kPrecursorAdjustment
+              });
+            }
+          }
+          if (neoNTermPrecursorMatches) {
+            variants.push({
+              sequence: pep.sequence,
+              labelPos: null,
+              labelType: "None",
+              labelSite: "N-ter",
+              nTermMassShift,
+              precursorAdjustment: nTermPrecursorAdjustment
+            });
+          }
           for (const variant of variants) {
-            const fragments = generateTheoreticalFragmentsWithMarking(variant.sequence, variant.labelPos, variant.labelType);
+            const fragments = generateTheoreticalFragmentsWithMarking(variant.sequence, variant.labelPos, variant.labelType, variant.nTermMassShift);
             const matches = matchTheoreticalToExperimental(fragments, s.msms, fragTol);
             const uniq = [];
             const seen = new Set();
@@ -2108,9 +2242,11 @@
             }
             const score = ionMatchScore(fragments, uniq);
 
-            const sequenceDesc = variant.labelPos != null
-              ? `${variant.sequence} (K${variant.labelPos + 1}*-${variant.labelType})`
-              : `${variant.sequence} (unlabeled)`;
+            const sequenceDesc = variant.labelSite === "N-ter"
+              ? `${variant.sequence} (N-ter ${labelType} ${variant.nTermMassShift > 0 ? "+" : ""}${variant.nTermMassShift.toFixed(4)} Da)`
+              : variant.labelPos != null
+                ? `${variant.sequence} (K${variant.labelPos + 1}*-${variant.labelType})`
+                : `${variant.sequence} (unlabeled)`;
 
             const thpMzTheo = 368.4;
             const thpPeak = s.msms.reduce((best, p) => {
@@ -2127,13 +2263,18 @@
               intensity: thpPeak.intens
             } : null;
 
-            const fragmentsArr = uniq.map(m => ({
-              fragment: formatFragmentType(m.type, m.num, variant.sequence),
-              mzObs: m.mzObs,
-              mzTheo: m.mzTheo,
-              delta: m.mzObs - m.mzTheo,
-              intensity: m.intensity
-            }));
+            const fragmentsArr = uniq.map(m => {
+              const fragment = formatFragmentType(m.type, m.num, variant.sequence);
+              const carriesNeoNTerm = variant.labelSite === "N-ter"
+                && (m.type === "a" || m.type.startsWith("b"));
+              return {
+                fragment: carriesNeoNTerm ? `${fragment} (N-ter)` : fragment,
+                mzObs: m.mzObs,
+                mzTheo: m.mzTheo,
+                delta: m.mzObs - m.mzTheo,
+                intensity: m.intensity
+              };
+            });
             if (thpEntry) fragmentsArr.push(thpEntry);
 
             const thpLine = hasTHP
@@ -2151,7 +2292,7 @@
               Sequence: sequenceDesc,
               Enzyme: pep.protein,
               Position: pep.position,
-              "Theoretical Mass": pep.adjustedMass,
+              "Theoretical Mass": pep.adjustedMass + variant.precursorAdjustment,
               Score: score,
               "Nb fragments": fragments.length,
               "Nb matches": uniq.length + (hasTHP ? 1 : 0),
@@ -2172,7 +2313,9 @@
       renderMsmsMatchesTable();
       $("msmsFragmentsText").value = "";
       $("exportMsmsBtn").disabled = !msmsRows.length;
-      setStatus("msmsStatus", `${msmsRows.length} lignes MS/MS`, msmsRows.length ? "ok" : "warn");
+      const totalFragsFiltered = sheets.reduce((acc, s) => acc + (s.filteredBySN || 0), 0);
+      const snMsmsMsg = snMsmsMin > 0 ? ` | S/N≥${snMsmsMin}: ${totalFragsFiltered} fragments exclus` : "";
+      setStatus("msmsStatus", `${msmsRows.length} lignes MS/MS${snMsmsMsg}`, msmsRows.length ? "ok" : "warn");
     } catch (err) {
       console.error(err);
       setStatus("msmsStatus", `Erreur: ${err.message}`, "err");
@@ -2286,8 +2429,7 @@
         mass += 18.010565;
 
         let labeledMass = mass;
-        if (labelType === "AmbCHCA" && peptideSeq.includes("K")) labeledMass += 304.095792;
-        else if (labelType === "AhxCHCA" && peptideSeq.includes("K")) labeledMass += 284.126092;
+        if (labelType !== "Aucun" && peptideSeq.includes("K")) labeledMass += config.markingTypes[labelType] || 0;
 
         peptides.push({
           sequence: peptideSeq,
