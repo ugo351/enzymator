@@ -442,6 +442,7 @@
                 <option>Biotin-PEG4-Pen</option>
                 <option>Aucun</option>
               </select>
+              <label style="display:block;margin-top:6px;"><input id="labelTyrosineMain" type="checkbox" /> Marquer aussi les Tyr (Y)</label>
             </div>
           </div>
         </fieldset>
@@ -515,6 +516,7 @@
                 <option>Biotin-PEG4-Pen</option>
                 <option selected>Aucun</option>
               </select>
+              <label style="display:block;margin-top:6px;"><input id="digestLabelTyrosine" type="checkbox" /> Marquer aussi les Tyr (Y)</label>
             </div>
           </div>
         </fieldset>
@@ -695,6 +697,7 @@
                 <option>Aucun</option>
               </select>
             </label>
+            <label><input id="msmsLabelTyrosine" type="checkbox" /> Marquer aussi les Tyr (Y)</label>
             <button id="runMsmsBtn" class="btn primary">Run MS/MS</button>
             <button id="exportMsmsBtn" class="btn secondary" disabled>Export MS/MS</button>
             <button id="clearMsmsBtn" class="btn danger">Clear</button>
@@ -831,6 +834,7 @@
   const massH = 1.007825;
   const massO = 15.994915;
   const massProton = 1.007276;
+  const labeledYResidueMass = 447.1794;
   const labeledKResidueMasses = {
     AmbCHCA: 432.17976,
     AhxCHCA: 412.21106,
@@ -944,6 +948,11 @@
     return targetMass - (config.markingTypes[labeling] || 0);
   }
 
+  function getLabeledResidueMassShift(labelType, residue) {
+    if (residue === "Y") return labeledYResidueMass - aminoAcidsMasses.Y;
+    return config.markingTypes[labelType] || 0;
+  }
+
   function verifySequence(seq) {
     return !(seq.endsWith("K") && (seq.split("K").length - 1) < 2);
   }
@@ -982,16 +991,15 @@
     return false;
   }
 
-  function calculateMissedCleavagesInProtein(proteinSeq, peptideStart, peptideEnd, enzymeKeys, label) {
+  function calculateMissedCleavagesInProtein(proteinSeq, peptideStart, peptideEnd, enzymeKeys, label, labelResidue = null, labelIndex = null) {
     if (!enzymeKeys.length) return 0;
-    const labeledK = label !== "Aucun";
+    const blockedResidue = label === "Aucun" ? null : labelResidue || "K";
     let count = 0;
-    let labeledKDeducted = false;
+    let labeledSiteDeducted = false;
     for (let i = peptideStart; i < peptideEnd; i++) {
       if (isCleavageSiteAt(proteinSeq, i, enzymeKeys)) {
-        // Exactly one K per peptide is labeled and not recognized by trypsin.
-        if (labeledK && proteinSeq[i] === "K" && !labeledKDeducted) {
-          labeledKDeducted = true; // skip this one labeled K only
+        if (blockedResidue && proteinSeq[i] === blockedResidue && (labelIndex == null || i === labelIndex) && !labeledSiteDeducted) {
+          labeledSiteDeducted = true;
         } else {
           count += 1;
         }
@@ -1127,11 +1135,17 @@
 
       const noMatches = [];
       const rows = [];
+      const labelTyrosine = $("labelTyrosineMain").checked;
+      const labelHypotheses = label === "Aucun"
+        ? [{ residue: null, massShift: 0 }]
+        : [
+            { residue: "K", massShift: getLabeledResidueMassShift(label, "K") },
+            ...(labelTyrosine ? [{ residue: "Y", massShift: getLabeledResidueMassShift(label, "Y") }] : [])
+          ];
       let testedCombinations = 0;
       let testedPossibilities = 0;
 
       for (const targetMass of targetMassList) {
-        const adjustedWantedMass = adjustTargetMass(targetMass, label);
         let found = false;
 
         for (const protein of selected) {
@@ -1142,39 +1156,63 @@
 
           if (protein === "CustomSeq") {
             sequenceToCompare = $("customMainSeq").value.trim().toUpperCase();
-            candidates = findPeptidesInSequence(sequenceToCompare, adjustedWantedMass, config.tolerance);
+            candidates = labelHypotheses.flatMap(hypothesis =>
+              findPeptidesInSequence(sequenceToCompare, targetMass - hypothesis.massShift, config.tolerance)
+                .map(candidate => ({ ...candidate, labelHypothesis: hypothesis }))
+            );
           } else {
             sequenceToCompare = sequencesDict[protein] || "";
-            candidates = findByMassIndexed(adjustedWantedMass, config.tolerance, protein);
+            candidates = labelHypotheses.flatMap(hypothesis =>
+              findByMassIndexed(targetMass - hypothesis.massShift, config.tolerance, protein)
+                .map(candidate => ({ ...candidate, labelHypothesis: hypothesis }))
+            );
           }
 
           for (const c of candidates) {
+            const labelHypothesis = c.labelHypothesis;
             testedPossibilities += 1;
             const seq = c.sequence;
             const adjustedMass = c.adjustedMass;
             const startPos = c.start;
             const endPos = c.end;
+            const labelSiteOffset = labelHypothesis.residue ? seq.indexOf(labelHypothesis.residue) : -1;
+            const hasLabeledResidue = labelSiteOffset >= 0;
+            const labelSiteIndex = hasLabeledResidue ? startPos + labelSiteOffset : null;
 
             if (selectedEnzymes.length) {
-              const endIsCleavage = endPos === sequenceToCompare.length - 1 || isCleavageSiteAt(sequenceToCompare, endPos, selectedEnzymes);
+              const endIsBlockedY = labelHypothesis.residue === "Y" && endPos === labelSiteIndex
+                && selectedEnzymes.includes("chymotrypsin");
+              const endIsCleavage = endPos === sequenceToCompare.length - 1
+                || (!endIsBlockedY && isCleavageSiteAt(sequenceToCompare, endPos, selectedEnzymes));
               const startIsCleavage = startPos === 0 || isCleavageSiteAt(sequenceToCompare, startPos - 1, selectedEnzymes);
               if (!endIsCleavage || !startIsCleavage) continue;
             }
             const hasNeoNTermLabelSite = (label === "AhxCHCA" || label === "Biotin-PEG4-Pen")
               && isNeoNTermPosition(protein, startPos + 1);
-            if (label !== "Aucun" && !seq.includes("K") && !hasNeoNTermLabelSite) continue;
+            if (label !== "Aucun" && !hasLabeledResidue && !(hasNeoNTermLabelSite && labelHypothesis.residue === "K")) continue;
             if (!verifySequence(seq)) continue;
 
-            const missedCleavagesForK = calculateMissedCleavagesInProtein(sequenceToCompare, startPos, endPos, selectedEnzymes, label);
+            const missedCleavagesForLabel = calculateMissedCleavagesInProtein(
+              sequenceToCompare,
+              startPos,
+              endPos,
+              selectedEnzymes,
+              label,
+              hasLabeledResidue ? labelHypothesis.residue : null,
+              labelSiteIndex
+            );
             const missedCleavagesForNeoNTerm = hasNeoNTermLabelSite
               ? calculateMissedCleavagesInProtein(sequenceToCompare, startPos, endPos, selectedEnzymes, "Aucun")
               : Infinity;
-            const miss = Math.min(missedCleavagesForK, missedCleavagesForNeoNTerm);
+            const miss = Math.min(missedCleavagesForLabel, missedCleavagesForNeoNTerm);
             if (miss > config.maxMissedCleavages) continue;
             const isNeoNTerm = isNeoNTermPosition(protein, startPos + 1);
             if (!includeProdomain && domainStatus(protein, startPos + 1) === "yes" && !isNeoNTerm) continue;
 
-            const labeledMass = adjustedMass + (config.markingTypes[label] || 0);
+            const massShift = hasLabeledResidue
+              ? labelHypothesis.massShift
+              : config.markingTypes[label] || 0;
+            const labeledMass = adjustedMass + massShift;
 
             const gap = Number((labeledMass - targetMass).toFixed(2));
             const prevAA = startPos > 0 ? sequenceToCompare[startPos - 1] : null;
@@ -1943,17 +1981,17 @@
     });
   }
 
-  function generateLabeledMsmsSequence(sequence, labelType) {
+  function generateLabeledMsmsSequence(sequence, labelType, labelResidue = "K") {
     if (labelType === "None" || labelType === "Aucun") {
-      return [{ sequence, labelPos: null, labelType: "None" }];
+      return [{ sequence, labelPos: null, labelType: "None", labelResidue: null }];
     }
-    const posK = [];
-    for (let i = 0; i < sequence.length; i++) if (sequence[i] === "K") posK.push(i);
-    if (!posK.length) return [{ sequence, labelPos: null, labelType: "None" }];
-    return posK.map(pos => ({ sequence, labelPos: pos, labelType }));
+    const labelPositions = [];
+    for (let i = 0; i < sequence.length; i++) if (sequence[i] === labelResidue) labelPositions.push(i);
+    if (!labelPositions.length) return [{ sequence, labelPos: null, labelType: "None", labelResidue: null }];
+    return labelPositions.map(pos => ({ sequence, labelPos: pos, labelType, labelResidue }));
   }
 
-  function generateTheoreticalFragmentsWithMarking(sequence, labelPos = null, labelType = "None", nTermMassShift = 0) {
+  function generateTheoreticalFragmentsWithMarking(sequence, labelPos = null, labelType = "None", nTermMassShift = 0, labelResidue = "K") {
     const fragments = [];
     const lossH2O = 18.010565;
     const lossNH3 = 17.026549;
@@ -1968,7 +2006,8 @@
     const massKBiotin = 714.3986;
 
     const getAaMass = (aa, position) => {
-      if (aa === "K" && labelPos != null && position === labelPos) {
+      if (aa === labelResidue && labelPos != null && position === labelPos) {
+        if (labelResidue === "Y") return labeledYResidueMass;
         if (labelType === "AhxCHCA") return massKAhx;
         if (labelType === "AmbCHCA") return massKAmb;
         if (labelType === "Biotin-PEG4-Pen") return massKBiotin;
@@ -2156,9 +2195,17 @@
         return;
       }
       const mainLabelType = $("labelMain")?.value || "Aucun";
+      const mainLabelTyrosine = $("labelTyrosineMain")?.checked || false;
+      const msmsLabelTyrosine = $("msmsLabelTyrosine")?.checked || false;
       const mainLabelMassShift = mainLabelType === "AmbCHCA" ? 304.095792
         : config.markingTypes[mainLabelType] || 0;
+      const mainYMassShift = mainLabelType !== "Aucun" && mainLabelTyrosine
+        ? getLabeledResidueMassShift(mainLabelType, "Y")
+        : 0;
       const msmsLabelMassShift = config.markingTypes[labelType] || 0;
+      const msmsYMassShift = labelType !== "Aucun" && msmsLabelTyrosine
+        ? getLabeledResidueMassShift(labelType, "Y")
+        : 0;
       const nTermMassShift = includeNeoNTerm
         ? getNeoNTermMassShift(labelType, customNTermMassShift)
         : null;
@@ -2175,6 +2222,7 @@
 
       for (const s of sheets) {
         const kPrecursorAdjustment = msmsLabelMassShift - mainLabelMassShift;
+        const yPrecursorAdjustment = msmsYMassShift - mainYMassShift;
         const nTermPrecursorAdjustment = nTermMassShift == null || nTermMassShift === 0
           ? null
           : nTermMassShift - mainLabelMassShift;
@@ -2182,6 +2230,7 @@
           const adjustments = [];
           if (labelType === "Aucun") adjustments.push(-mainLabelMassShift);
           else if (pep.sequence.includes("K")) adjustments.push(kPrecursorAdjustment);
+          if (msmsYMassShift && pep.sequence.includes("Y")) adjustments.push(yPrecursorAdjustment);
           if (nTermPrecursorAdjustment != null && isNeoNTermPosition(pep.protein, pep.position)) {
             adjustments.push(nTermPrecursorAdjustment);
           }
@@ -2200,6 +2249,18 @@
             : pep.sequence.includes("K")
               && missedCleavagesForLabel(labelType) <= config.maxMissedCleavages
               && Math.abs(pep.adjustedMass + kPrecursorAdjustment + 1 - s.precursorMass) <= tolerance;
+          const yPrecursorMatches = msmsYMassShift > 0
+            && pep.sequence.includes("Y")
+            && calculateMissedCleavagesInProtein(
+              proteinSequence,
+              peptideStart,
+              peptideEnd,
+              selectedEnzymes,
+              labelType,
+              "Y",
+              peptideStart + pep.sequence.indexOf("Y")
+            ) <= config.maxMissedCleavages
+            && Math.abs(pep.adjustedMass + yPrecursorAdjustment + 1 - s.precursorMass) <= tolerance;
           const neoNTermPrecursorMatches = nTermPrecursorAdjustment != null
             && isNeoNTermPosition(pep.protein, pep.position)
             && missedCleavagesForLabel("Aucun") <= config.maxMissedCleavages
@@ -2207,7 +2268,7 @@
           const variants = [];
           if (kPrecursorMatches) {
             const lysineVariants = labelType === "Aucun"
-              ? [{ sequence: pep.sequence, labelPos: null, labelType: "None" }]
+              ? [{ sequence: pep.sequence, labelPos: null, labelType: "None", labelResidue: null }]
               : generateLabeledMsmsSequence(pep.sequence, labelType);
             for (const variant of lysineVariants) {
               variants.push({
@@ -2215,6 +2276,16 @@
                 labelSite: labelType === "Aucun" ? "None" : "K",
                 nTermMassShift: 0,
                 precursorAdjustment: labelType === "Aucun" ? -mainLabelMassShift : kPrecursorAdjustment
+              });
+            }
+          }
+          if (yPrecursorMatches) {
+            for (const variant of generateLabeledMsmsSequence(pep.sequence, labelType, "Y")) {
+              variants.push({
+                ...variant,
+                labelSite: "Y",
+                nTermMassShift: 0,
+                precursorAdjustment: yPrecursorAdjustment
               });
             }
           }
@@ -2229,7 +2300,13 @@
             });
           }
           for (const variant of variants) {
-            const fragments = generateTheoreticalFragmentsWithMarking(variant.sequence, variant.labelPos, variant.labelType, variant.nTermMassShift);
+            const fragments = generateTheoreticalFragmentsWithMarking(
+              variant.sequence,
+              variant.labelPos,
+              variant.labelType,
+              variant.nTermMassShift,
+              variant.labelResidue || "K"
+            );
             const matches = matchTheoreticalToExperimental(fragments, s.msms, fragTol);
             const uniq = [];
             const seen = new Set();
@@ -2245,22 +2322,22 @@
             const sequenceDesc = variant.labelSite === "N-ter"
               ? `${variant.sequence} (N-ter ${labelType} ${variant.nTermMassShift > 0 ? "+" : ""}${variant.nTermMassShift.toFixed(4)} Da)`
               : variant.labelPos != null
-                ? `${variant.sequence} (K${variant.labelPos + 1}*-${variant.labelType})`
+                ? `${variant.sequence} (${variant.labelResidue}${variant.labelPos + 1}*-${variant.labelType})`
                 : `${variant.sequence} (unlabeled)`;
 
             const thpMzTheo = 368.4;
-            const thpPeak = s.msms.reduce((best, p) => {
-              const d = Math.abs(p.mz - thpMzTheo);
-              return d <= 0.5 && (!best || d < Math.abs(best.mz - thpMzTheo)) ? p : best;
+            const thpMatch = variant.labelSite === "N-ter" ? null : s.msms.reduce((best, p) => {
+              const delta = Math.abs(p.mz - thpMzTheo);
+              return delta <= 0.5 && (!best || delta < best.delta) ? { peak: p, mzTheo: thpMzTheo, delta } : best;
             }, null);
-            const hasTHP = thpPeak !== null;
+            const hasTHP = thpMatch !== null;
 
             const thpEntry = hasTHP ? {
               fragment: "THP",
-              mzObs: thpPeak.mz,
-              mzTheo: thpMzTheo,
-              delta: thpPeak.mz - thpMzTheo,
-              intensity: thpPeak.intens
+              mzObs: thpMatch.peak.mz,
+              mzTheo: thpMatch.mzTheo,
+              delta: thpMatch.peak.mz - thpMatch.mzTheo,
+              intensity: thpMatch.peak.intens
             } : null;
 
             const fragmentsArr = uniq.map(m => {
@@ -2278,7 +2355,7 @@
             if (thpEntry) fragmentsArr.push(thpEntry);
 
             const thpLine = hasTHP
-              ? `THP | calc:${thpMzTheo.toFixed(4)} | obs:${thpPeak.mz.toFixed(4)}`
+              ? `THP | calc:${thpMatch.mzTheo.toFixed(4)} | obs:${thpMatch.peak.mz.toFixed(4)}`
               : "";
             fragmentsArr.sort((a, b) => a.mzObs - b.mzObs);
 
@@ -2408,38 +2485,66 @@
   }
 
   // 6) Digest-only
-  function digestProtein(sequence, enzymeKeys, maxMissedCleavages, labelType) {
+  function digestProtein(sequence, enzymeKeys, maxMissedCleavages, labelType, labelTyrosine = false) {
     const cleavagePos = [-1];
     for (let i = 0; i < sequence.length; i++) {
       if (isCleavageSiteAt(sequence, i, enzymeKeys)) cleavagePos.push(i);
     }
     cleavagePos.push(sequence.length - 1);
 
-    const peptides = [];
-    for (let i = 0; i < cleavagePos.length - 1; i++) {
-      for (let mc = 0; mc <= maxMissedCleavages; mc++) {
-        if (i + mc + 1 >= cleavagePos.length) break;
-        const start = cleavagePos[i] + 1;
-        const end = cleavagePos[i + mc + 1] + 1;
-        const peptideSeq = sequence.slice(start, end);
-        if (peptideSeq.length < 2) continue;
-
-        let mass = 0;
-        for (const aa of peptideSeq) mass += aminoAcidsMasses[aa] || 0;
-        mass += 18.010565;
-
-        let labeledMass = mass;
-        if (labelType !== "Aucun" && peptideSeq.includes("K")) labeledMass += config.markingTypes[labelType] || 0;
-
-        peptides.push({
-          sequence: peptideSeq,
-          start: start + 1,
-          end,
-          mass: +mass.toFixed(4),
-          labeledMass: +labeledMass.toFixed(4),
-          missedCleavages: mc,
-          length: peptideSeq.length
+    const scenarios = [{ cleavagePos, taggedY: null }];
+    if (labelType !== "Aucun" && labelTyrosine) {
+      for (let i = 0; i < sequence.length; i++) {
+        if (sequence[i] !== "Y") continue;
+        const blocksChymotrypsin = enzymeKeys.includes("chymotrypsin") && isCleavageSiteAt(sequence, i, enzymeKeys);
+        scenarios.push({
+          cleavagePos: blocksChymotrypsin ? cleavagePos.filter(position => position !== i) : cleavagePos,
+          taggedY: i
         });
+      }
+    }
+
+    const peptides = [];
+    const seen = new Set();
+    for (const scenario of scenarios) {
+      for (let i = 0; i < scenario.cleavagePos.length - 1; i++) {
+        for (let mc = 0; mc <= maxMissedCleavages; mc++) {
+          if (i + mc + 1 >= scenario.cleavagePos.length) break;
+          const start = scenario.cleavagePos[i] + 1;
+          const end = scenario.cleavagePos[i + mc + 1] + 1;
+          const peptideSeq = sequence.slice(start, end);
+          if (peptideSeq.length < 2) continue;
+          if (scenario.taggedY != null && (scenario.taggedY < start || scenario.taggedY >= end)) continue;
+
+          let mass = 0;
+          for (const aa of peptideSeq) mass += aminoAcidsMasses[aa] || 0;
+          mass += 18.010565;
+
+          let labelVariants;
+          if (scenario.taggedY != null) {
+            labelVariants = [{ site: "Y", massShift: getLabeledResidueMassShift(labelType, "Y") }];
+          } else if (labelType !== "Aucun" && peptideSeq.includes("K")) {
+            labelVariants = [{ site: "K", massShift: getLabeledResidueMassShift(labelType, "K") }];
+          } else {
+            labelVariants = [{ site: "", massShift: 0 }];
+          }
+
+          for (const variant of labelVariants) {
+            const key = `${start}:${end}:${variant.site}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            peptides.push({
+              sequence: peptideSeq,
+              start: start + 1,
+              end,
+              mass: +mass.toFixed(4),
+              labeledMass: +(mass + variant.massShift).toFixed(4),
+              labelSite: variant.site,
+              missedCleavages: mc,
+              length: peptideSeq.length
+            });
+          }
+        }
       }
     }
     return peptides;
@@ -2459,6 +2564,7 @@
 
       const maxMc = Number($("digestMC").value || 2);
       const label = $("digestLabel").value;
+      const labelTyrosine = $("digestLabelTyrosine").checked;
       const selectedEnzymes = getSelectedDigestEnzymes();
 
       if (!selectedEnzymes.length) {
@@ -2479,13 +2585,14 @@
         const seq = protein === "CustomSeq" ? $("digestCustomSeq").value.trim().toUpperCase() : (sequencesDict[protein] || "");
         if (!seq) continue;
 
-        const peps = digestProtein(seq, selectedEnzymes, maxMc, label);
+        const peps = digestProtein(seq, selectedEnzymes, maxMc, label, labelTyrosine);
         for (const p of peps) {
           allPeptides.push({
             Protein: protein,
             Sequence: p.sequence,
             Position: `${p.start}-${p.end}`,
             Length: p.length,
+            "Label site": p.labelSite || "None",
             "Mass (unlabeled)": p.mass,
             "Mass (labeled)": p.labeledMass,
             MissedCleavages: p.missedCleavages
@@ -2509,7 +2616,7 @@
       lines.push("");
 
       for (const pep of filteredPeptides) {
-        lines.push(`Protein: ${pep.Protein} | Sequence: ${pep.Sequence} | Position: ${pep.Position} | Length: ${pep.Length} | Mass: ${pep["Mass (unlabeled)"]} | Labeled Mass: ${pep["Mass (labeled)"]} | MC: ${pep.MissedCleavages}`);
+        lines.push(`Protein: ${pep.Protein} | Sequence: ${pep.Sequence} | Position: ${pep.Position} | Length: ${pep.Length} | Label: ${pep["Label site"]} | Mass: ${pep["Mass (unlabeled)"]} | Labeled Mass: ${pep["Mass (labeled)"]} | MC: ${pep.MissedCleavages}`);
       }
 
       $("digestResults").value = lines.join("\n");
