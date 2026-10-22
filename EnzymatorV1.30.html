@@ -472,8 +472,8 @@
           <div class="row" style="margin-top:8px;">
             <button id="toggleAllMain" class="btn">Select/Deselect All</button>
           </div>
-          <label style="display:block;margin-top:8px;"><input id="useCustomMain" type="checkbox" /> Use Custom Sequence</label>
-          <textarea id="customMainSeq" placeholder="Coller une sequence proteique (AA) ici"></textarea>
+          <label style="display:block;margin-top:8px;"><input id="useCustomMain" type="checkbox" /> Use Custom Sequence(s)</label>
+          <textarea id="customMainSeq" placeholder="Une sequence brute ou plusieurs sequences au format FASTA&#10;>Sequence_1&#10;MKW...&#10;>Sequence_2&#10;GAA..."></textarea>
         </fieldset>
       </div>
 
@@ -522,9 +522,9 @@
         </fieldset>
 
         <fieldset>
-          <legend>Custom sequence</legend>
-          <label><input id="digestUseCustom" type="checkbox" /> Use custom sequence</label>
-          <textarea id="digestCustomSeq" placeholder="Coller une sequence ici"></textarea>
+          <legend>Custom sequence(s)</legend>
+          <label><input id="digestUseCustom" type="checkbox" /> Use custom sequence(s)</label>
+          <textarea id="digestCustomSeq" placeholder="Une sequence brute ou plusieurs sequences au format FASTA&#10;>Sequence_1&#10;MKW...&#10;>Sequence_2&#10;GAA..."></textarea>
           <div class="row" style="margin-top:8px;">
             <button id="toggleAllDigest" class="btn">Select/Deselect All</button>
           </div>
@@ -911,6 +911,7 @@
   let lastIsotopeAValues = [];
   let msmsWorkbook = null;
   let lastUniprotSearchResults = [];
+  const customSequenceRegistry = new Map();
   const soustractorVizState = {
     rawA: [],
     rawE: [],
@@ -955,6 +956,42 @@
 
   function verifySequence(seq) {
     return !(seq.endsWith("K") && (seq.split("K").length - 1) < 2);
+  }
+
+  function parseCustomSequences(text) {
+    const lines = String(text || "").split(/\r?\n/);
+    const sequences = [];
+    let currentName = "";
+    let currentSequence = [];
+
+    function addCurrent() {
+      const sequence = currentSequence.join("").replace(/\s+/g, "").toUpperCase();
+      if (sequence) sequences.push({ name: currentName.trim(), sequence });
+      currentSequence = [];
+    }
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (line.startsWith(">")) {
+        addCurrent();
+        currentName = line.slice(1).trim();
+      } else {
+        currentSequence.push(line);
+      }
+    }
+    addCurrent();
+    return sequences;
+  }
+
+  function registerCustomSequences(text, scope) {
+    const parsed = parseCustomSequences(text);
+    return parsed.map((entry, index) => {
+      const suffix = entry.name ? ` - ${entry.name}` : "";
+      const id = `Custom ${scope} ${index + 1}${suffix}`;
+      customSequenceRegistry.set(id, entry.sequence);
+      return id;
+    });
   }
 
   function getSelectedMainEnzymes() {
@@ -1134,11 +1171,6 @@
   // 3) Main MALDI analysis
   function runMainSearch() {
     try {
-      if (!Object.keys(sequencesDict).length) {
-        setStatus("mainStatus", "Aucune sequence chargee. Ouvrir Data Loader.", "warn");
-        return;
-      }
-
       const t0 = performance.now();
       const massInput = $("massEntry").value.trim();
       const targetMassList = parseMassList(massInput);
@@ -1150,8 +1182,15 @@
       config.maxMissedCleavages = Number($("mcMain").value || 3);
 
       const selected = selectedProteinsMain();
-      if ($("useCustomMain").checked && $("customMainSeq").value.trim()) selected.push("CustomSeq");
+      const customIds = $("useCustomMain").checked
+        ? registerCustomSequences($("customMainSeq").value, "Main")
+        : [];
+      selected.push(...customIds);
 
+      if (!Object.keys(sequencesDict).length && !customIds.length) {
+        setStatus("mainStatus", "Aucune sequence chargee. Ouvrir Data Loader ou ajouter une sequence custom.", "warn");
+        return;
+      }
       if (!targetMassList.length || !selected.length) {
         setStatus("mainStatus", "Verifier les masses et sequences selectionnees.", "warn");
         return;
@@ -1178,8 +1217,8 @@
           let sequenceToCompare = "";
           let candidates = [];
 
-          if (protein === "CustomSeq") {
-            sequenceToCompare = $("customMainSeq").value.trim().toUpperCase();
+          if (customSequenceRegistry.has(protein)) {
+            sequenceToCompare = customSequenceRegistry.get(protein);
             candidates = labelHypotheses.flatMap(hypothesis =>
               findPeptidesInSequence(sequenceToCompare, targetMass - hypothesis.massShift, config.tolerance)
                 .map(candidate => ({ ...candidate, labelHypothesis: hypothesis }))
@@ -2269,8 +2308,9 @@
             ? null
             : nTermMassShift - pep.originalMassShift;
           const [peptideStart, peptideEnd] = String(pep.position || "").split("-").map(value => Number(value) - 1);
-          const proteinSequence = sequencesDict[pep.protein]
-            || (pep.protein === "CustomSeq" ? $("customMainSeq").value.trim().toUpperCase() : "");
+          const proteinSequence = customSequenceRegistry.get(pep.protein)
+            || sequencesDict[pep.protein]
+            || "";
           const selectedEnzymes = getSelectedMainEnzymes();
           const missedCleavagesForLabel = label => proteinSequence
             ? calculateMissedCleavagesInProtein(proteinSequence, peptideStart, peptideEnd, selectedEnzymes, label)
@@ -2605,11 +2645,6 @@
 
   function runDigestOnly() {
     try {
-      if (!Object.keys(sequencesDict).length) {
-        setStatus("digestStatus", "Aucune sequence chargee. Ouvrir Data Loader.", "warn");
-        return;
-      }
-
       const maxMc = Number($("digestMC").value || 2);
       const label = $("digestLabel").value;
       const labelTyrosine = $("digestLabelTyrosine").checked;
@@ -2622,7 +2657,14 @@
       const enzymeLabel = selectedEnzymes.map(k => enzymeRules[k]?.label || k).join(" + ");
 
       const selected = selectedDigestProteins();
-      if ($("digestUseCustom").checked && $("digestCustomSeq").value.trim()) selected.push("CustomSeq");
+      const customIds = $("digestUseCustom").checked
+        ? registerCustomSequences($("digestCustomSeq").value, "Digest")
+        : [];
+      selected.push(...customIds);
+      if (!Object.keys(sequencesDict).length && !customIds.length) {
+        setStatus("digestStatus", "Aucune sequence chargee. Ouvrir Data Loader ou ajouter une sequence custom.", "warn");
+        return;
+      }
       if (!selected.length) {
         setStatus("digestStatus", "Selectionner au moins une proteine.", "warn");
         return;
@@ -2630,7 +2672,7 @@
 
       const allPeptides = [];
       for (const protein of selected) {
-        const seq = protein === "CustomSeq" ? $("digestCustomSeq").value.trim().toUpperCase() : (sequencesDict[protein] || "");
+        const seq = customSequenceRegistry.get(protein) || sequencesDict[protein] || "";
         if (!seq) continue;
 
         const peps = digestProtein(seq, selectedEnzymes, maxMc, label, labelTyrosine);
